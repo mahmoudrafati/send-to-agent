@@ -174,7 +174,8 @@ public final class HermesAPIClient: @unchecked Sendable {
             throw HermesAPIError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
-            throw HermesAPIError.httpStatus(http.statusCode, data)
+            let body = String(data: data, encoding: .utf8)
+            throw HermesAPIError.httpStatus(http.statusCode, body)
         }
         return try JSONDecoder().decode(HermesShareResponse.self, from: data)
     }
@@ -196,7 +197,19 @@ public struct HermesShareResponse: Codable, Sendable {
     }
 }
 
-public enum HermesAPIError: Error {
+public enum HermesAPIError: Error, LocalizedError {
     case invalidResponse
-    case httpStatus(Int, Data)
+    case httpStatus(Int, String?)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidResponse:
+            return "Ungültige Antwort vom Backend"
+        case .httpStatus(let status, let body):
+            if let body, !body.isEmpty {
+                return "HTTP \(status): \(body)"
+            }
+            return "HTTP \(status)"
+        }
+    }
 }
