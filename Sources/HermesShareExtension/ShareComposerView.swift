@@ -10,6 +10,8 @@ struct ShareComposerView: View {
     @State private var isSending = false
     @State private var status: String?
 
+    private let store = HermesConfigurationStore()
+
     var body: some View {
         NavigationStack {
             Form {
@@ -35,6 +37,10 @@ struct ShareComposerView: View {
                         Text(initialText)
                             .lineLimit(4)
                     }
+                    if initialURL == nil, initialText == nil {
+                        Text("No share payload yet.")
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 Button(isSending ? "sending..." : "send to hermes") {
@@ -51,28 +57,53 @@ struct ShareComposerView: View {
         }
     }
 
+    @MainActor
     private func send() async {
         isSending = true
         defer { isSending = false }
 
-        // TODO: load config from app group + token from keychain
-        // TODO: build HermesAPIClient and POST payload
-        let payload = HermesSharePayload(
-            schemaVersion: "1.0",
-            destination: destination,
-            agentId: destination == .coordinator ? "default" : "ingestion",
-            prompt: prompt.isEmpty ? nil : prompt,
-            source: HermesShareSource(platform: "ios", app: nil, shareExtensionVersion: "0.1.0"),
-            content: HermesSharedContent(
-                type: initialURL != nil ? "url" : "text",
-                title: nil,
-                url: initialURL,
-                text: initialText,
-                files: []
-            ),
-            client: HermesClientMetadata(requestId: UUID(), createdAt: Date())
-        )
+        do {
+            guard let endpoint = store.loadEndpointURL() else {
+                status = HermesConfigurationError.missingEndpoint.localizedDescription
+                return
+            }
+            guard let token = try store.loadToken(), !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                status = HermesConfigurationError.missingToken.localizedDescription
+                return
+            }
 
-        status = "payload ready: \(payload.destination.rawValue)"
+            let payload = HermesSharePayload(
+                schemaVersion: "1.0",
+                destination: destination,
+                agentId: destination.defaultAgentId,
+                prompt: prompt.isEmpty ? nil : prompt,
+                source: HermesShareSource(
+                    platform: "ios",
+                    app: Bundle.main.bundleIdentifier,
+                    shareExtensionVersion: HermesAppDefaults.shareExtensionVersion
+                ),
+                content: HermesSharedContent(
+                    type: initialURL != nil ? "url" : "text",
+                    title: nil,
+                    url: initialURL,
+                    text: initialText,
+                    files: []
+                ),
+                client: HermesClientMetadata(requestId: UUID(), createdAt: Date())
+            )
+
+            let client = HermesAPIClient(config: HermesConnectionConfig(endpointURL: endpoint)) {
+                token
+            }
+            let response = try await client.send(payload)
+            if response.ok {
+                let identifier = response.taskId ?? response.messageId ?? "ok"
+                status = "Gesendet ✓ \(identifier)"
+            } else {
+                status = "Backend hat ok=false zurückgegeben."
+            }
+        } catch {
+            status = "Send failed: \(error.localizedDescription)"
+        }
     }
 }

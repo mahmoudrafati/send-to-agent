@@ -1,25 +1,142 @@
 import Foundation
 
-public struct HermesConnectionConfig: Codable, Equatable {
-    public var baseURL: URL
-    public var tokenReference: String
+public enum HermesAppDefaults {
+    public static let appGroupIdentifier = "group.com.mahmoudrafati.hermesshare"
+    public static let endpointKey = "hermes.endpointURL"
+    public static let tokenKey = "hermes.apiToken"
+    public static let shareExtensionVersion = "0.1.0"
+}
+
+public struct HermesConnectionConfig: Codable, Equatable, Sendable {
+    public var endpointURL: URL
     public var defaultCoordinatorAgentId: String
     public var defaultIngestionAgentId: String
 
     public init(
-        baseURL: URL,
-        tokenReference: String,
+        endpointURL: URL,
         defaultCoordinatorAgentId: String = "default",
         defaultIngestionAgentId: String = "ingestion"
     ) {
-        self.baseURL = baseURL
-        self.tokenReference = tokenReference
+        self.endpointURL = endpointURL
         self.defaultCoordinatorAgentId = defaultCoordinatorAgentId
         self.defaultIngestionAgentId = defaultIngestionAgentId
     }
 }
 
-public final class HermesAPIClient {
+public struct HermesAppConfiguration: Equatable, Sendable {
+    public var endpointURL: URL?
+    public var hasStoredToken: Bool
+
+    public init(endpointURL: URL?, hasStoredToken: Bool) {
+        self.endpointURL = endpointURL
+        self.hasStoredToken = hasStoredToken
+    }
+}
+
+public enum HermesConfigurationError: LocalizedError {
+    case invalidEndpoint(String)
+    case missingEndpoint
+    case missingToken
+    case invalidStoredToken
+    case keychain(OSStatus)
+
+    public var errorDescription: String? {
+        switch self {
+        case .invalidEndpoint(let value):
+            return "Ungültige Endpoint-URL: \(value)"
+        case .missingEndpoint:
+            return "Bitte zuerst einen Endpoint speichern."
+        case .missingToken:
+            return "Bitte einen Bearer Token speichern."
+        case .invalidStoredToken:
+            return "Keychain Token konnte nicht gelesen werden."
+        case .keychain(let status):
+            return "Keychain error: \(status)"
+        }
+    }
+}
+
+public final class HermesConfigurationStore {
+    private let defaults: UserDefaults
+
+    public init(defaults: UserDefaults = UserDefaults(suiteName: HermesAppDefaults.appGroupIdentifier) ?? .standard) {
+        self.defaults = defaults
+    }
+
+    public func loadEndpointURL() -> URL? {
+        guard let raw = defaults.string(forKey: HermesAppDefaults.endpointKey) else {
+            return nil
+        }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        return URL(string: trimmed)
+    }
+
+    public func saveEndpointURL(_ url: URL) {
+        defaults.set(url.absoluteString, forKey: HermesAppDefaults.endpointKey)
+    }
+
+    public func validateEndpoint(_ rawValue: String) throws -> URL {
+        let trimmed = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let url = URL(string: trimmed) else {
+            throw HermesConfigurationError.invalidEndpoint(rawValue)
+        }
+        guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let scheme = components.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              components.host != nil else {
+            throw HermesConfigurationError.invalidEndpoint(rawValue)
+        }
+        return components.url ?? url
+    }
+
+    public func currentConfiguration() -> HermesAppConfiguration {
+        HermesAppConfiguration(endpointURL: loadEndpointURL(), hasStoredToken: hasStoredToken())
+    }
+
+    public func saveToken(_ token: String) throws {
+        try HermesSharedTokenStore.save(token)
+    }
+
+    public func loadToken() throws -> String? {
+        try HermesSharedTokenStore.load()
+    }
+
+    public func hasStoredToken() -> Bool {
+        guard let token = try? loadToken() else { return false }
+        return token.isEmpty == false
+    }
+
+    public func save(endpointURL: URL, token: String?) throws {
+        saveEndpointURL(endpointURL)
+        if let token, !token.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            try saveToken(token)
+        }
+    }
+}
+
+public enum HermesSharedTokenStore {
+    private static var defaults: UserDefaults {
+        UserDefaults(suiteName: HermesAppDefaults.appGroupIdentifier) ?? .standard
+    }
+
+    public static func save(_ token: String) throws {
+        defaults.set(token.trimmingCharacters(in: .whitespacesAndNewlines), forKey: HermesAppDefaults.tokenKey)
+    }
+
+    public static func load() throws -> String? {
+        guard let token = defaults.string(forKey: HermesAppDefaults.tokenKey)?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
+            return nil
+        }
+        return token
+    }
+
+    public static func delete() throws {
+        defaults.removeObject(forKey: HermesAppDefaults.tokenKey)
+    }
+}
+
+public final class HermesAPIClient: @unchecked Sendable {
     private let config: HermesConnectionConfig
     private let tokenProvider: () throws -> String
     private let session: URLSession
@@ -27,7 +144,7 @@ public final class HermesAPIClient {
     public init(
         config: HermesConnectionConfig,
         session: URLSession = .shared,
-        tokenProvider: @escaping () throws -> String
+        tokenProvider: @Sendable @escaping () throws -> String
     ) {
         self.config = config
         self.session = session
@@ -35,11 +152,18 @@ public final class HermesAPIClient {
     }
 
     public func send(_ payload: HermesSharePayload) async throws -> HermesShareResponse {
-        let endpoint = config.baseURL.appending(path: "api/hermes/share")
+        let endpoint = config.endpointURL.appending(path: "api/hermes/share")
         var request = URLRequest(url: endpoint)
         request.httpMethod = "POST"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "content-type")
-        request.setValue("Bearer \(try tokenProvider())", forHTTPHeaderField: "authorization")
+        request.setValue("application/json", forHTTPHeaderField: "accept")
+        let token = try tokenProvider().trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !token.isEmpty else {
+            throw HermesConfigurationError.missingToken
+        }
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "authorization")
 
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -56,7 +180,7 @@ public final class HermesAPIClient {
     }
 }
 
-public struct HermesShareResponse: Codable {
+public struct HermesShareResponse: Codable, Sendable {
     public let ok: Bool
     public let taskId: String?
     public let messageId: String?

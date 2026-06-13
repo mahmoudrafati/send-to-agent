@@ -1,6 +1,6 @@
 import Foundation
 
-public enum HermesDestination: String, Codable, CaseIterable, Identifiable {
+public enum HermesDestination: String, Codable, CaseIterable, Identifiable, Sendable {
     case coordinator
     case ingestion
 
@@ -12,9 +12,18 @@ public enum HermesDestination: String, Codable, CaseIterable, Identifiable {
         case .ingestion: return "Ingestion"
         }
     }
+
+    public var defaultAgentId: String {
+        switch self {
+        case .coordinator:
+            return "default"
+        case .ingestion:
+            return "ingestion"
+        }
+    }
 }
 
-public struct HermesSharePayload: Codable {
+public struct HermesSharePayload: Codable, Sendable {
     public let schemaVersion: String
     public let destination: HermesDestination
     public let agentId: String?
@@ -34,7 +43,7 @@ public struct HermesSharePayload: Codable {
     }
 }
 
-public struct HermesShareSource: Codable {
+public struct HermesShareSource: Codable, Sendable {
     public let platform: String
     public let app: String?
     public let shareExtensionVersion: String
@@ -46,7 +55,7 @@ public struct HermesShareSource: Codable {
     }
 }
 
-public struct HermesSharedContent: Codable {
+public struct HermesSharedContent: Codable, Sendable {
     public let type: String
     public let title: String?
     public let url: URL?
@@ -54,7 +63,7 @@ public struct HermesSharedContent: Codable {
     public let files: [HermesSharedFile]
 }
 
-public struct HermesSharedFile: Codable {
+public struct HermesSharedFile: Codable, Sendable {
     public let filename: String
     public let mimeType: String?
     public let sizeBytes: Int?
@@ -68,7 +77,7 @@ public struct HermesSharedFile: Codable {
     }
 }
 
-public struct HermesClientMetadata: Codable {
+public struct HermesClientMetadata: Codable, Sendable {
     public let requestId: UUID
     public let createdAt: Date
 
